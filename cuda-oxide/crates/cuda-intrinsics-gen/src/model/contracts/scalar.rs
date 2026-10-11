@@ -232,8 +232,8 @@ pub enum ScalarMathOperation {
     /// record for tanh at all (llc 22 selects `llvm.nvvm.tanh.approx.f32`
     /// via NVVMIntrinsic-class matching, and llc 21 miscompiles it into an
     /// extern funcall), so this is the family's only PTX-native source.
-    /// Hardware floor is sm_75 (PTX ISA 7.0); the family contract gates it
-    /// at the attested sm_80 evidence floor like every other variant.
+    /// Hardware floor is sm_75 (PTX ISA 7.0), the same as every other
+    /// variant.
     Tanh,
 }
 

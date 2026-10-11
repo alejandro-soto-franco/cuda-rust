@@ -162,8 +162,8 @@ pub(in crate::resolve) fn canonical_scalar_math_variants() -> Vec<ScalarMathVari
         (F32, Ex2, Approx, Preserve),
         (F32, Ex2, Approx, Ftz),
         // tanh: approx f32 only; the instruction has no ftz form (PTX ISA
-        // Table 29) and no rounded variants. Hardware floor is sm_75; the
-        // family contract gates it at the attested sm_80 evidence floor.
+        // Table 29) and no rounded variants. Its hardware floor is sm_75,
+        // which is also the family floor.
         (F32, Tanh, Approx, Preserve),
         // ex2.approx.f16 starts at PTX 7.0 / sm_75. LLVM 22 rejects the
         // .ftz.f16 spelling; .ftz.bf16 is a separate PTX 7.8 / sm_90 variant.
@@ -280,8 +280,8 @@ pub(in crate::resolve) fn scalar_math_recipe(
 
     let (rust_type, dialect_type, minimum_ptx, minimum_sm) = match format {
         ScalarMathFormat::F16 => ("u16", "i16", "7.0", "sm_75"),
-        ScalarMathFormat::F32 => ("f32", "f32", "7.0", "sm_80"),
-        ScalarMathFormat::F64 => ("f64", "f64", "7.0", "sm_80"),
+        ScalarMathFormat::F32 => ("f32", "f32", "7.0", "sm_75"),
+        ScalarMathFormat::F64 => ("f64", "f64", "7.0", "sm_75"),
     };
     Some(ScalarMathRecipe {
         id,

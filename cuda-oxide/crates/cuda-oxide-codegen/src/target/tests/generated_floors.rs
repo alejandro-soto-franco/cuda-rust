@@ -832,3 +832,52 @@ fn generated_m16n8k8_mma_floors_admit_turing_only_for_fp16() {
         }
     }
 }
+
+#[test]
+fn generated_scalar_float_floors_admit_turing() {
+    use crate::generated_intrinsic_targets::{
+        GeneratedIntrinsicBackend, generated_intrinsic_targets,
+    };
+
+    let targets = generated_intrinsic_targets()
+        .filter(|target| {
+            matches!(
+                target.dialect_op,
+                "nvvm.scalar_arithmetic" | "nvvm.scalar_math"
+            )
+        })
+        .collect::<Vec<_>>();
+    // 64 scalar-arithmetic and 41 scalar-math variants; a lower count means a
+    // variant dropped out of the loop below.
+    assert_eq!(targets.len(), 105);
+
+    for target in targets {
+        for backend in [
+            GeneratedIntrinsicBackend::LlvmNvptx,
+            GeneratedIntrinsicBackend::LibNvvm,
+        ] {
+            let generated =
+                GeneratedModuleRequirements::from_targets(vec![target]).for_backend(backend);
+            let label = format!("{} {backend:?}", target.id);
+            assert_eq!(
+                generated_ptx_isa_requirement(&generated).unwrap(),
+                PtxIsaRequirement::new(70),
+                "{label}"
+            );
+            assert!(
+                generated_target_satisfied(&"sm_75".parse().unwrap(), &generated),
+                "{label}"
+            );
+            validate_generated_target(&"sm_75".parse().unwrap(), &generated)
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert!(
+                !generated_target_satisfied(&"sm_72".parse().unwrap(), &generated),
+                "{label}"
+            );
+            let error =
+                validate_generated_target(&"sm_72".parse().unwrap(), &generated).unwrap_err();
+            assert!(error.contains(target.id), "{error}");
+            assert!(error.contains("sm_75 or newer"), "{error}");
+        }
+    }
+}

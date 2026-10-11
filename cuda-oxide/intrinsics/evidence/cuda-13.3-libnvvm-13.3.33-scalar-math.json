@@ -11,30 +11,30 @@
   "debug_ir_version": "3.2",
   "defaults": {
     "target_triple": "nvptx64-nvidia-cuda",
-    "gpu_target": "compute_80",
+    "gpu_target": "compute_75",
     "ptx_feature": "PTX ISA 7.0 minimum; CUDA 13.3 emits PTX 9.3",
     "status": "validated",
     "runtime_validation": "unexecuted"
   },
   "fixtures": [
     {
-      "id": "scalar_math_compute80_ptx93",
+      "id": "scalar_math_compute75_ptx93",
       "coverage_count": 37,
       "stages": [
         {
           "targets": [
-            "compute_80",
+            "compute_75",
             "ptx93"
           ],
           "representation": "37 pure inline-PTX scalar math calls in one retained NVVM IR kernel",
           "stage": "backend_codegen",
           "mechanism": "inline_ptx",
           "outcome": "succeeded",
-          "detail": "CUDA 13.3 libNVVM compiled the typed-pointer NVVM IR fixture to PTX 9.3 and LTOIR. All 37 scalar math variants (sin, cos, lg2, rcp, rsqrt, sqrt with approx and rounded precision modes) are retained as exact, unique instructions with no extern calls or unresolved llvm.nvvm symbols."
+          "detail": "CUDA 13.3 libNVVM compiled the 11,183-byte typed-pointer NVVM IR fixture (SHA-256 aebbad20d28a7d77db2fc845b612b2f2b2402eff4968b6f896de972813dfc346) to 5,826-byte PTX 9.3 (SHA-256 ca1c42b55166769e4118eec67a72aefa2857a8327d44fa953c5c6365cd3db8c0) and 5,344-byte LTOIR (SHA-256 7e33630b82f572805b7e767832cfc5d501f01e2df95735547e7117a9c1e8c28f). The PTX retained all 37 exact, unique instructions with no extern calls or unresolved llvm.nvvm symbols. The fixture is sm75-scalar-floors-2026-10-11/scalar_math_compute75_ptx93.nvvm.ll."
         },
         {
           "targets": [
-            "sm_80",
+            "sm_75",
             "ptx93"
           ],
           "representation": "libNVVM-emitted PTX retaining all 37 scalar math forms",
@@ -42,22 +42,22 @@
           "mechanism": "inline_ptx",
           "outcome": "succeeded",
           "artifact_kind": "cubin",
-          "detail": "CUDA 13.3 ptxas assembled the 37-function PTX proof into an sm_80 cubin with SHA-256 6bcec1b1eab13da703fdade053704aa6ab00591a1b38dd7daf48ac0dec541df2.",
+          "detail": "CUDA 13.3 ptxas assembled the retained PTX into a 31,656-byte sm_75 cubin with SHA-256 ac7772bc4fc4991cf31a0a0b0970757d1500e3df78b1e0e669814b6172bcb591.",
           "tool_path": "/usr/local/cuda-13.3/bin/ptxas",
           "tool_version": "Cuda compilation tools, release 13.3, V13.3.33; build cuda_13.3.r13.3/compiler.37862127_0",
           "tool_sha256": "7fdd01a4cf50e30746da98989c9272a907f491e6fd7fecfda14642e4375f88fb"
         },
         {
           "targets": [
-            "sm_80",
+            "sm_75",
             "ptx93"
           ],
-          "representation": "retained scalar-math libNVVM LTOIR linked to an sm_80 cubin",
+          "representation": "retained scalar math libNVVM LTOIR linked to an sm_75 cubin",
           "stage": "device_link",
           "mechanism": "inline_ptx",
           "outcome": "succeeded",
           "artifact_kind": "cubin",
-          "detail": "CUDA 13.3 nvJitLink emitted linked PTX byte-identical to the direct libNVVM PTX and produced an sm_80 cubin. The cubin exports scalar_math_inline with the expected text section.",
+          "detail": "CUDA 13.3 nvJitLink emitted linked PTX byte-identical to the direct libNVVM PTX and a 31,656-byte sm_75 cubin with SHA-256 f67862a22bb70336a459b4fe16b7f28081f539f7dc05fd43e8f87dbb9fdcff95. The cubin exports scalar_math_inline with a 0x5800-byte text section.",
           "tool_path": "/usr/local/cuda-13.3/targets/x86_64-linux/lib/libnvJitLink.so.13.3.33",
           "tool_version": "nvJitLinkVersion 13.3; CUDA 13.3 V13.3.33",
           "tool_sha256": "3ba1e744347cd68617b862eccfd98b125482e882b7a6319f42abc9a768513db8"
@@ -65,46 +65,46 @@
       ]
     },
     {
-      "id": "scalar_math_compute80_ptx93_appended",
+      "id": "scalar_math_compute75_ptx93_appended",
       "coverage_count": 3,
       "stages": [
         {
           "targets": [
-            "compute_80",
+            "compute_75",
             "ptx93"
           ],
-          "representation": "3 appended pure inline-PTX scalar math calls in one typed-pointer NVVM IR fixture",
+          "representation": "3 pure inline-PTX scalar math calls in one retained NVVM IR kernel",
           "stage": "backend_codegen",
           "mechanism": "inline_ptx",
           "outcome": "succeeded",
-          "detail": "CUDA 13.3 libNVVM verified and compiled a dedicated typed-pointer NVVM IR fixture holding the 3 appended variants (ex2.approx.f32, ex2.approx.ftz.f32, tanh.approx.f32) for compute_80. The emitted PTX 9.3 output retains each instruction exactly once with no extern calls; PTX SHA-256 9d2a3b28989cf40d76816090ce6051c2347f46d8bbbd6fd7fb5b479977e5d7cc."
+          "detail": "CUDA 13.3 libNVVM compiled the 1,475-byte typed-pointer NVVM IR fixture (SHA-256 9350c81a708d1024cd1e4f6754b635a8efee45a28c24da0d6ebf47aed43b2d4d) to 1,039-byte PTX 9.3 (SHA-256 89e0c9da32f4b8797a14d51e7cc2ccf77da9a48de627183bc493ec53d1e624c9) and 2,024-byte LTOIR (SHA-256 0851f310b30f2b84881aee0748dad875b18c86a584f294113bd7c131107f0dcf). The PTX retained all 3 exact, unique instructions with no extern calls or unresolved llvm.nvvm symbols. The fixture is sm75-scalar-floors-2026-10-11/scalar_math_compute75_ptx93_appended.nvvm.ll."
         },
         {
           "targets": [
-            "sm_80",
+            "sm_75",
             "ptx93"
           ],
-          "representation": "libNVVM-emitted PTX retaining the 3 appended scalar math forms",
+          "representation": "libNVVM-emitted PTX retaining all 3 scalar math forms",
           "stage": "ptx_assembly",
           "mechanism": "inline_ptx",
           "outcome": "succeeded",
           "artifact_kind": "cubin",
-          "detail": "CUDA 13.3 ptxas assembled the appended-fixture PTX into an sm_80 cubin with SHA-256 134a765e19dd2267cf41934ad4ffa3ec0a6f54c43406d4da3102adfb9334e955. tanh.approx.f32's hardware floor is sm_75 (PTX ISA 7.0); the family admits it at the attested sm_80 evidence floor.",
+          "detail": "CUDA 13.3 ptxas assembled the retained PTX into a 3,368-byte sm_75 cubin with SHA-256 8254be684a8dacb032f26ecaebe41bb740995c6a467d5f4edd8cd5384cd082fe.",
           "tool_path": "/usr/local/cuda-13.3/bin/ptxas",
           "tool_version": "Cuda compilation tools, release 13.3, V13.3.33; build cuda_13.3.r13.3/compiler.37862127_0",
           "tool_sha256": "7fdd01a4cf50e30746da98989c9272a907f491e6fd7fecfda14642e4375f88fb"
         },
         {
           "targets": [
-            "sm_80",
+            "sm_75",
             "ptx93"
           ],
-          "representation": "appended-fixture libNVVM LTOIR linked to an sm_80 cubin",
+          "representation": "retained scalar math libNVVM LTOIR linked to an sm_75 cubin",
           "stage": "device_link",
           "mechanism": "inline_ptx",
           "outcome": "succeeded",
           "artifact_kind": "cubin",
-          "detail": "CUDA 13.3 libNVVM compiled the appended fixture with -gen-lto to a 1,848-byte LTOIR (SHA-256 6c6fcf6eb5ddef3cf3ea605c0a866c8cc4db63bae1df7abca521ff507283b56d) and nvJitLink 13.3 linked it into a 1,464-byte sm_80 cubin (SHA-256 3e4a06eab6319f8d75a890f4b2645d35d92125c79eaa2b63dba2e5383552d632) with all three appended instructions retained.",
+          "detail": "CUDA 13.3 nvJitLink emitted linked PTX byte-identical to the direct libNVVM PTX and a 3,368-byte sm_75 cubin with SHA-256 652def0aca16b1f3c21b76beb768070747f3841514d3464d3006ddc9c6b7412b. The cubin exports scalar_math_inline with a 0x180-byte text section.",
           "tool_path": "/usr/local/cuda-13.3/targets/x86_64-linux/lib/libnvJitLink.so.13.3.33",
           "tool_version": "nvJitLinkVersion 13.3; CUDA 13.3 V13.3.33",
           "tool_sha256": "3ba1e744347cd68617b862eccfd98b125482e882b7a6319f42abc9a768513db8"
@@ -124,7 +124,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -166,7 +166,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -209,7 +209,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -251,7 +251,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -294,7 +294,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -336,7 +336,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -379,7 +379,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -421,7 +421,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -464,7 +464,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -509,7 +509,7 @@
       ],
       "product_count": 4,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "rcp_${rounding}_f32",
@@ -554,7 +554,7 @@
       ],
       "product_count": 4,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "rcp_${rounding}_ftz_f32",
@@ -600,7 +600,7 @@
       ],
       "product_count": 4,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "rcp_${rounding}_f64",
@@ -642,7 +642,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -685,7 +685,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -728,7 +728,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -770,7 +770,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "${id}",
@@ -816,7 +816,7 @@
       ],
       "product_count": 4,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "sqrt_${rounding}_f32",
@@ -861,7 +861,7 @@
       ],
       "product_count": 4,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "sqrt_${rounding}_ftz_f32",
@@ -907,7 +907,7 @@
       ],
       "product_count": 4,
       "fixtures": [
-        "scalar_math_compute80_ptx93"
+        "scalar_math_compute75_ptx93"
       ],
       "template": {
         "id": "sqrt_${rounding}_f64",
@@ -949,7 +949,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93_appended"
+        "scalar_math_compute75_ptx93_appended"
       ],
       "template": {
         "id": "${id}",
@@ -991,7 +991,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93_appended"
+        "scalar_math_compute75_ptx93_appended"
       ],
       "template": {
         "id": "${id}",
@@ -1034,7 +1034,7 @@
       ],
       "product_count": 1,
       "fixtures": [
-        "scalar_math_compute80_ptx93_appended"
+        "scalar_math_compute75_ptx93_appended"
       ],
       "template": {
         "id": "${id}",
