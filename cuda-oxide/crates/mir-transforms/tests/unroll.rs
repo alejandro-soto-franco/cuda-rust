@@ -20,17 +20,19 @@ use common::{
     range_for_loop, u32t,
 };
 use dialect_mir::ops::{
-    MirAddOp, MirBitAndOp, MirCallOp, MirCheckedAddOp, MirCheckedSubOp, MirCondBranchOp,
-    MirConstantOp, MirGeOp, MirGetDiscriminantOp, MirGtOp, MirLeOp, MirLtOp, MirNotOp, MirReturnOp,
-    MirSubOp, MirUnrollHintOp,
+    MirAddOp, MirAllocaOp, MirArrayElementAddrOp, MirBitAndOp, MirCallOp, MirCheckedAddOp,
+    MirCheckedSubOp, MirCondBranchOp, MirConstantOp, MirExtractArrayElementOp, MirGeOp,
+    MirGetDiscriminantOp, MirGtOp, MirLeOp, MirLoadOp, MirLtOp, MirNotOp, MirReturnOp, MirSubOp,
+    MirUnrollHintOp,
 };
+use dialect_mir::types::{MirArrayType, MirPtrType};
 use mir_transforms::analyses::induction::{CmpPred, analyze};
-use mir_transforms::unroll::unroll_annotated_loops;
+use mir_transforms::unroll::{unroll_annotated_loops, unroll_annotated_loops_naming_locals};
 use pliron::attribute::Attribute;
 use pliron::builtin::attributes::{IntegerAttr, StringAttr};
 use pliron::builtin::op_interfaces::BranchOpInterface;
 use pliron::builtin::ops::ConstantOp;
-use pliron::builtin::types::{FunctionType, IntegerType, Signedness};
+use pliron::builtin::types::{FP32Type, FunctionType, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::graph::{ControlFlowGraph, dominance::DomInfo};
 use pliron::linked_list::ContainsLinkedList;
@@ -40,6 +42,7 @@ use pliron::pass::AnalysisManager;
 use pliron::region::Region;
 use pliron::r#type::{Typed, TypedHandle};
 use pliron::value::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mir_transforms::analyses::loop_info::LoopInfo;
@@ -727,6 +730,250 @@ fn counter_with_an_unrecognized_exit_test_is_skipped() {
 
     assert_eq!(loop_count(&ctx, lp.region), 1, "the source loop remains");
     assert_eq!(hint_count(&ctx, lp.region), 0, "the request was consumed");
+}
+
+/// A body with more operations than one unroll may clone.
+const OVER_BUDGET_OPS: usize = 40_000;
+
+/// Put `count` dead constants at the front of `block`.
+fn pad_with_constants(
+    ctx: &mut Context,
+    block: Ptr<pliron::basic_block::BasicBlock>,
+    count: usize,
+) {
+    let ty = u32t(ctx);
+    for _ in 0..count {
+        let op = Operation::new(
+            ctx,
+            MirConstantOp::get_concrete_op_info(),
+            vec![ty.into()],
+            vec![],
+            vec![],
+            0,
+        );
+        MirConstantOp::new(op).set_attr_value(
+            ctx,
+            IntegerAttr::new(
+                ty,
+                pliron::utils::apint::APInt::from_i64(7, std::num::NonZero::new(32).unwrap()),
+            ),
+        );
+        op.insert_at_front(block, ctx);
+    }
+}
+
+/// Insert an op at the front of `block` and return its first result.
+fn insert_front(
+    ctx: &mut Context,
+    block: Ptr<pliron::basic_block::BasicBlock>,
+    info: (fn(Ptr<Operation>) -> pliron::op::OpBox, std::any::TypeId),
+    result: Option<pliron::r#type::TypeHandle>,
+    operands: Vec<Value>,
+) -> Ptr<Operation> {
+    let op = Operation::new(ctx, info, result.into_iter().collect(), operands, vec![], 0);
+    op.insert_at_front(block, ctx);
+    op
+}
+
+/// How the loop body reaches the local array `[[f32; 4]; 8]` in one case.
+#[derive(Clone, Copy, Debug)]
+enum Access {
+    /// `array_element_addr(slot, i)`
+    Counter,
+    /// `array_element_addr(slot, i + 1)`
+    CounterPlusOne,
+    /// `array_element_addr(slot, 3)`
+    Constant,
+    /// `array_element_addr(array_element_addr(slot, i), 2)`
+    CounterThenConstant,
+    /// `array_element_addr(array_element_addr(slot, 2), i)`
+    ConstantThenCounter,
+    /// `extract_array_element(load(slot), i)`
+    ExtractByCounter,
+}
+
+/// Build a counted loop over the growth budget whose body touches one local
+/// array in the way `access` says, run the unroller, and return the stack slots
+/// it asked the callback to describe along with the slot that backs the array.
+fn describe_slots_for(access: Access, factor: u32) -> (Vec<Ptr<Operation>>, Ptr<Operation>) {
+    let mut ctx = mir_ctx();
+    let lp = counted_loop(&mut ctx, if factor == 0 { 2 } else { 8 });
+    let f32_ty = FP32Type::get(&ctx);
+    let row_ty = MirArrayType::get(&mut ctx, f32_ty.into(), 4);
+    let array_ty = MirArrayType::get(&mut ctx, row_ty.into(), 8);
+    let array_ptr = MirPtrType::get_generic(&mut ctx, array_ty.into(), true);
+    let row_ptr = MirPtrType::get_generic(&mut ctx, row_ty.into(), true);
+    let elem_ptr = MirPtrType::get_generic(&mut ctx, f32_ty.into(), true);
+    let u32_ty = u32t(&mut ctx);
+
+    let slot = insert_front(
+        &mut ctx,
+        lp.preheader,
+        MirAllocaOp::get_concrete_op_info(),
+        Some(array_ptr.into()),
+        vec![],
+    );
+    let slot_ptr = slot.deref(&ctx).get_result(0);
+    let counter = lp.header.deref(&ctx).get_argument(1);
+
+    // The body ops go in front of the latch's own ops, then the padding goes
+    // in front of them, so the order below is the reverse of execution order.
+    let constant = |ctx: &mut Context, value: i64| {
+        let op = Operation::new(
+            ctx,
+            MirConstantOp::get_concrete_op_info(),
+            vec![u32_ty.into()],
+            vec![],
+            vec![],
+            0,
+        );
+        MirConstantOp::new(op).set_attr_value(
+            ctx,
+            IntegerAttr::new(
+                u32_ty,
+                pliron::utils::apint::APInt::from_i64(value, std::num::NonZero::new(32).unwrap()),
+            ),
+        );
+        op.insert_at_front(lp.latch, ctx);
+        op.deref(ctx).get_result(0)
+    };
+    let element_addr =
+        |ctx: &mut Context, base: Value, index: Value, result: pliron::r#type::TypeHandle| {
+            insert_front(
+                ctx,
+                lp.latch,
+                MirArrayElementAddrOp::get_concrete_op_info(),
+                Some(result),
+                vec![base, index],
+            )
+            .deref(ctx)
+            .get_result(0)
+        };
+    match access {
+        Access::Counter => {
+            element_addr(&mut ctx, slot_ptr, counter, row_ptr.into());
+        }
+        Access::CounterPlusOne => {
+            let one = constant(&mut ctx, 1);
+            let plus_one = insert_front(
+                &mut ctx,
+                lp.latch,
+                MirAddOp::get_concrete_op_info(),
+                Some(u32_ty.into()),
+                vec![counter, one],
+            )
+            .deref(&ctx)
+            .get_result(0);
+            element_addr(&mut ctx, slot_ptr, plus_one, row_ptr.into());
+        }
+        Access::Constant => {
+            let three = constant(&mut ctx, 3);
+            element_addr(&mut ctx, slot_ptr, three, row_ptr.into());
+        }
+        Access::CounterThenConstant => {
+            let row = element_addr(&mut ctx, slot_ptr, counter, row_ptr.into());
+            let two = constant(&mut ctx, 2);
+            element_addr(&mut ctx, row, two, elem_ptr.into());
+        }
+        Access::ConstantThenCounter => {
+            let two = constant(&mut ctx, 2);
+            let row = element_addr(&mut ctx, slot_ptr, two, row_ptr.into());
+            element_addr(&mut ctx, row, counter, elem_ptr.into());
+        }
+        Access::ExtractByCounter => {
+            let loaded = insert_front(
+                &mut ctx,
+                lp.latch,
+                MirLoadOp::get_concrete_op_info(),
+                Some(array_ty.into()),
+                vec![slot_ptr],
+            )
+            .deref(&ctx)
+            .get_result(0);
+            insert_front(
+                &mut ctx,
+                lp.latch,
+                MirExtractArrayElementOp::get_concrete_op_info(),
+                Some(row_ty.into()),
+                vec![loaded, counter],
+            );
+        }
+    }
+    pad_with_constants(&mut ctx, lp.latch, OVER_BUDGET_OPS);
+    MirUnrollHintOp::new(&mut ctx, factor)
+        .get_operation()
+        .insert_at_front(lp.latch, &ctx);
+
+    let described = RefCell::new(Vec::new());
+    let mut analyses = AnalysisManager::default();
+    unroll_annotated_loops_naming_locals(lp.module, &mut ctx, &mut analyses, &|_, slot| {
+        described.borrow_mut().push(slot);
+        Some("local `acc`".to_string())
+    })
+    .expect("a loop over the budget is a warning + skip");
+
+    assert_eq!(
+        loop_count(&ctx, lp.region),
+        1,
+        "{access:?}: the loop remains"
+    );
+    assert_eq!(
+        hint_count(&ctx, lp.region),
+        0,
+        "{access:?}: the request was consumed"
+    );
+    (described.into_inner(), slot)
+}
+
+/// A loop over the growth budget names the local array it selects an element
+/// of with its counter, however the address is formed, for full and partial
+/// unrolling alike.
+#[test]
+fn over_budget_loop_names_the_local_array_it_indexes_by_its_counter() {
+    let cases = [
+        (Access::Counter, true),
+        (Access::CounterPlusOne, true),
+        (Access::CounterThenConstant, true),
+        (Access::ExtractByCounter, true),
+        (Access::Constant, false),
+        (Access::ConstantThenCounter, true),
+    ];
+    for factor in [0, 2] {
+        for (access, expect_named) in cases {
+            let (described, slot) = describe_slots_for(access, factor);
+            if expect_named {
+                assert_eq!(
+                    described,
+                    vec![slot],
+                    "{access:?}, factor {factor}: the array's stack slot is named once"
+                );
+            } else {
+                assert!(
+                    described.is_empty(),
+                    "{access:?}, factor {factor}: a constant index leaves the array in registers"
+                );
+            }
+        }
+    }
+}
+
+/// The callback is not consulted when the loop unrolls.
+#[test]
+fn a_loop_within_budget_names_no_local() {
+    let mut ctx = mir_ctx();
+    let lp = counted_loop(&mut ctx, 4);
+    MirUnrollHintOp::new(&mut ctx, 0)
+        .get_operation()
+        .insert_at_front(lp.latch, &ctx);
+    let called = RefCell::new(0usize);
+    let mut analyses = AnalysisManager::default();
+    unroll_annotated_loops_naming_locals(lp.module, &mut ctx, &mut analyses, &|_, _| {
+        *called.borrow_mut() += 1;
+        None
+    })
+    .expect("unroll pass succeeds");
+    assert_eq!(loop_count(&ctx, lp.region), 0, "the loop unrolls");
+    assert_eq!(called.into_inner(), 0);
 }
 
 /// Evaluate the generated guard with the MIR integer type's wrapping semantics.

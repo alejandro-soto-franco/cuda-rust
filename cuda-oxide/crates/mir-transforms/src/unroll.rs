@@ -44,16 +44,21 @@
 //! each loop runs), and on pliron's IR cloning (`pliron::irbuild::cloning`) to
 //! duplicate the body.
 
+use dialect_mir::ops::aggregate::{
+    MirArrayElementAddrOp, MirExtractArrayElementOp, MirFieldAddrOp,
+};
 use dialect_mir::ops::arithmetic::{MirAddOp, MirBitAndOp, MirRemOp, MirSubOp};
 use dialect_mir::ops::comparison::{MirGeOp, MirGtOp, MirLeOp, MirLtOp};
 use dialect_mir::ops::constants::MirConstantOp;
 use dialect_mir::ops::control_flow::{MirCondBranchOp, MirGotoOp, MirUnrollHintOp};
 use dialect_mir::ops::function::MirFuncOp;
+use dialect_mir::ops::memory::{MirAllocaOp, MirLoadOp, MirPtrOffsetOp};
 use dialect_mir::ops::{MirStorageDeadOp, MirStorageLiveOp};
+use dialect_mir::types::MirArrayType;
 use pliron::basic_block::BasicBlock;
 use pliron::builtin::attributes::IntegerAttr;
 use pliron::builtin::op_interfaces::OperandSegmentInterface;
-use pliron::builtin::types::{IntegerType, Signedness};
+use pliron::builtin::types::{FP16Type, FP32Type, FP64Type, IntegerType, Signedness};
 use pliron::context::{Context, Ptr};
 use pliron::graph::ControlFlowGraph;
 use pliron::graph::dominance::DomInfo;
@@ -70,6 +75,7 @@ use pliron::opts::constants::sccp::sccp;
 use pliron::opts::dce::{SideEffects, dce};
 use pliron::opts::simplify_cfg::simplify_cfg;
 use pliron::pass::AnalysisManager;
+use pliron::printable::Printable;
 use pliron::region::Region;
 use pliron::result::Result;
 use pliron::r#type::{TypeHandle, Typed, TypedHandle};
@@ -191,6 +197,188 @@ fn check_growth_budget(
     Ok(())
 }
 
+/// The outcome for a loop that a growth budget refused, with the local arrays
+/// it indexes by its counter.
+fn over_budget(ctx: &Context, s: &LoopShape, reason: String) -> UnrollOutcome {
+    let locals = counter_indexed_locals(ctx, s);
+    UnrollOutcome::OverBudget { reason, locals }
+}
+
+/// How many levels of operands [`depends_on_counter`] follows.
+const COUNTER_DEPENDENCE_DEPTH: u32 = 8;
+
+/// True if `v` is the loop counter `iv` or is computed from it inside the loop.
+fn depends_on_counter(
+    ctx: &Context,
+    v: Value,
+    iv: Value,
+    loop_blocks: &FxHashSet<Ptr<BasicBlock>>,
+    depth: u32,
+) -> bool {
+    if v == iv {
+        return true;
+    }
+    if depth == 0 || !defined_in_loop(ctx, v, loop_blocks) {
+        return false;
+    }
+    let Some(def) = v.defining_op() else {
+        return false;
+    };
+    let operands: Vec<Value> = def.deref(ctx).operands().collect();
+    operands
+        .into_iter()
+        .any(|operand| depends_on_counter(ctx, operand, iv, loop_blocks, depth - 1))
+}
+
+/// The `mir.alloca` that backs `address`, following element, field and offset
+/// projections. `None` when the address is not rooted in a stack slot.
+fn root_alloca(ctx: &Context, address: Value) -> Option<Ptr<Operation>> {
+    let mut current = address;
+    for _ in 0..32 {
+        let def = current.defining_op()?;
+        if Operation::get_op::<MirAllocaOp>(def, ctx).is_some() {
+            return Some(def);
+        }
+        let projects = Operation::get_op::<MirArrayElementAddrOp>(def, ctx).is_some()
+            || Operation::get_op::<MirFieldAddrOp>(def, ctx).is_some()
+            || Operation::get_op::<MirPtrOffsetOp>(def, ctx).is_some();
+        if !projects {
+            return None;
+        }
+        current = def.deref(ctx).get_operand(0);
+    }
+    None
+}
+
+/// The stack slots whose array the loop indexes with its counter, in first-use
+/// order. While the loop stays rolled the index is a runtime value, so LLVM
+/// cannot split such an array into registers and the array lives in local
+/// memory.
+fn counter_indexed_locals(ctx: &Context, s: &LoopShape) -> Vec<Ptr<Operation>> {
+    let iv = s.header_args[s.iv_idx];
+    let mut locals: Vec<Ptr<Operation>> = Vec::new();
+    for &block in &s.body_blocks_ordered {
+        for op in block.deref(ctx).iter(ctx) {
+            let (array, index) = if Operation::get_op::<MirArrayElementAddrOp>(op, ctx).is_some() {
+                (op.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1))
+            } else if Operation::get_op::<MirExtractArrayElementOp>(op, ctx).is_some() {
+                // The array is a loaded value; its address is the load's operand.
+                let value = op.deref(ctx).get_operand(0);
+                let Some(load) = value
+                    .defining_op()
+                    .filter(|&d| Operation::get_op::<MirLoadOp>(d, ctx).is_some())
+                else {
+                    continue;
+                };
+                (load.deref(ctx).get_operand(0), op.deref(ctx).get_operand(1))
+            } else {
+                continue;
+            };
+            if !depends_on_counter(ctx, index, iv, &s.loop_blocks, COUNTER_DEPENDENCE_DEPTH) {
+                continue;
+            }
+            if let Some(slot) = root_alloca(ctx, array)
+                && !locals.contains(&slot)
+            {
+                locals.push(slot);
+            }
+        }
+    }
+    locals
+}
+
+/// Source spelling of an array type such as `[[f32; 8]; 32]`, or the printed
+/// type for an element this pass does not spell.
+fn array_shape(ctx: &Context, ty: TypeHandle) -> String {
+    let ty_ref = ty.deref(ctx);
+    if let Some(array) = ty_ref.downcast_ref::<MirArrayType>() {
+        return format!(
+            "[{}; {}]",
+            array_shape(ctx, array.element_type()),
+            array.size()
+        );
+    }
+    if let Some(int) = ty_ref.downcast_ref::<IntegerType>() {
+        let prefix = match int.signedness() {
+            Signedness::Unsigned => "u",
+            Signedness::Signed => "i",
+            Signedness::Signless => "i",
+        };
+        return format!("{prefix}{}", int.width());
+    }
+    if ty_ref.is::<FP32Type>() {
+        return "f32".to_string();
+    }
+    if ty_ref.is::<FP64Type>() {
+        return "f64".to_string();
+    }
+    if ty_ref.is::<FP16Type>() {
+        return "f16".to_string();
+    }
+    drop(ty_ref);
+    ty.disp(ctx).to_string()
+}
+
+/// Longest list of arrays named in one warning.
+const MAX_NAMED_LOCALS: usize = 3;
+
+/// The sentence a budget warning appends for the arrays in `locals`, with its
+/// leading space. Empty when the loop indexes no local array by its counter.
+fn local_array_note(
+    ctx: &Context,
+    locals: &[Ptr<Operation>],
+    describe_local: DescribeLocal<'_>,
+) -> String {
+    let described: Vec<String> = locals
+        .iter()
+        .map(|&slot| {
+            describe_local(ctx, slot).unwrap_or_else(|| {
+                let pointee = slot
+                    .deref(ctx)
+                    .get_result(0)
+                    .get_type(ctx)
+                    .deref(ctx)
+                    .downcast_ref::<dialect_mir::types::MirPtrType>()
+                    .map(|ptr| array_shape(ctx, ptr.pointee));
+                match pointee {
+                    Some(shape) => format!("an unnamed local (`{shape}`)"),
+                    None => "an unnamed local".to_string(),
+                }
+            })
+        })
+        .collect();
+    join_local_note(&described)
+}
+
+/// Format the note for already-described arrays.
+fn join_local_note(described: &[String]) -> String {
+    let shown = &described[..described.len().min(MAX_NAMED_LOCALS)];
+    let list = match shown {
+        [] => return String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    };
+    let more = described.len() - shown.len();
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    let noun = if described.len() == 1 {
+        "an element of"
+    } else {
+        "elements of"
+    };
+    let verb = if described.len() == 1 {
+        "That array lives"
+    } else {
+        "Those arrays live"
+    };
+    format!(
+        ". The loop selects {noun} {list}{tail} with its counter. {verb} in local memory (`.local`) while the loop stays rolled"
+    )
+}
+
 /// Count one body copy and check every code-growth budget before cloning.
 fn check_clone_budget(
     ctx: &Context,
@@ -226,11 +414,30 @@ fn check_clone_budget(
 pub fn unroll_annotated_loops(
     module: Ptr<Operation>,
     ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<()> {
+    unroll_annotated_loops_naming_locals(module, ctx, analyses, &|_, _| None)
+}
+
+/// Describes the source local behind a `mir.alloca` for a diagnostic, for
+/// example "local `acc` (`[[f32; 8]; 32]`, 1024 bytes)". Returns `None` when the slot
+/// has no source name on record.
+pub type DescribeLocal<'a> = &'a dyn Fn(&Context, Ptr<Operation>) -> Option<String>;
+
+/// [`unroll_annotated_loops`] with a callback that names the source local
+/// behind a stack slot. A loop that stays rolled because it is over the
+/// code-growth budget uses it to say which local array the loop indexes by its
+/// counter, and so which array stays in local memory. The IR transformation is
+/// the same.
+pub fn unroll_annotated_loops_naming_locals(
+    module: Ptr<Operation>,
+    ctx: &mut Context,
     // The caller threads in the manager mem2reg used. We deliberately do not use
     // it: the CFG-normalization step below changes block structure, which would
     // stale that manager's cached dominator trees. We build a fresh manager
     // afterwards instead. (Kept in the signature to match pliron's pass shape.)
     _analyses: &mut AnalysisManager,
+    describe_local: DescribeLocal<'_>,
 ) -> Result<()> {
     // Nothing annotated => leave every function byte-for-byte untouched.
     let has_hints = collect_functions(module, ctx)
@@ -456,6 +663,17 @@ pub fn unroll_annotated_loops(
                         not_unrolled_warning(&kind, &reason, location.as_deref())
                     );
                 }
+                UnrollOutcome::OverBudget { reason, locals } => {
+                    let note = local_array_note(ctx, &locals, describe_local);
+                    eprintln!(
+                        "{}",
+                        not_unrolled_warning(
+                            &kind,
+                            &format!("{reason}{note}"),
+                            location.as_deref()
+                        )
+                    );
+                }
             }
         }
         if function_changed {
@@ -487,6 +705,14 @@ enum UnrollOutcome {
     /// this into a loud warning (the author asked for unrolling, so we never
     /// silently do nothing). Earlier normalization may still have rewritten its CFG.
     Skipped(String),
+    /// Like [`Skipped`](Self::Skipped), for a loop over a code-growth budget.
+    /// `locals` holds the stack slots of the local arrays whose element the
+    /// loop selects with its counter. Those arrays stay in memory while the
+    /// loop stays rolled.
+    OverBudget {
+        reason: String,
+        locals: Vec<Ptr<Operation>>,
+    },
 }
 
 /// The facts the unroller needs about a loop, gathered once and shared by full
@@ -1034,7 +1260,7 @@ fn full_unroll(
         }
     };
     if let Err(reason) = check_clone_budget(ctx, trip_count, &s.body_blocks_ordered) {
-        return Ok(UnrollOutcome::Skipped(reason));
+        return Ok(over_budget(ctx, &s, reason));
     }
     if !liveouts_are_safe(ctx, &s) {
         return Ok(UnrollOutcome::Skipped(
@@ -1209,7 +1435,7 @@ fn partial_unroll(
         Err(why) => return Ok(UnrollOutcome::Skipped(why)),
     };
     if let Err(reason) = check_clone_budget(ctx, u64::from(factor), &s.body_blocks_ordered) {
-        return Ok(UnrollOutcome::Skipped(reason));
+        return Ok(over_budget(ctx, &s, reason));
     }
     let factor_usize = match usize::try_from(factor) {
         Ok(factor) => factor,
@@ -1690,7 +1916,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        MirUnrollHintOp, check_growth_budget, hint_location, not_unrolled_warning, unroll_kind,
+        MirUnrollHintOp, check_growth_budget, hint_location, join_local_note, not_unrolled_warning,
+        unroll_kind,
     };
     use pliron::combine::stream::position::SourcePosition;
     use pliron::context::Context;
@@ -1773,5 +2000,35 @@ mod tests {
         );
         assert!(!warning.contains('\n'), "{warning}");
         assert!(warning.ends_with(reason), "{warning}");
+    }
+
+    #[test]
+    fn local_array_note_names_each_array_up_to_the_limit() {
+        let acc = "local `acc` (`[[f32; 8]; 32]`, 1024 bytes)".to_string();
+        let tmp = "local `tmp` (`[u32; 4]`, 16 bytes)".to_string();
+        let out = "local `out` (`[f32; 2]`, 8 bytes)".to_string();
+        let aux = "local `aux` (`[u8; 2]`, 2 bytes)".to_string();
+        let cases: [(Vec<String>, &str); 5] = [
+            (vec![], ""),
+            (
+                vec![acc.clone()],
+                ". The loop selects an element of local `acc` (`[[f32; 8]; 32]`, 1024 bytes) with its counter. That array lives in local memory (`.local`) while the loop stays rolled",
+            ),
+            (
+                vec![acc.clone(), tmp.clone()],
+                ". The loop selects elements of local `acc` (`[[f32; 8]; 32]`, 1024 bytes) and local `tmp` (`[u32; 4]`, 16 bytes) with its counter. Those arrays live in local memory (`.local`) while the loop stays rolled",
+            ),
+            (
+                vec![acc.clone(), tmp.clone(), out.clone()],
+                ". The loop selects elements of local `acc` (`[[f32; 8]; 32]`, 1024 bytes), local `tmp` (`[u32; 4]`, 16 bytes) and local `out` (`[f32; 2]`, 8 bytes) with its counter. Those arrays live in local memory (`.local`) while the loop stays rolled",
+            ),
+            (
+                vec![acc, tmp, out, aux],
+                ". The loop selects elements of local `acc` (`[[f32; 8]; 32]`, 1024 bytes), local `tmp` (`[u32; 4]`, 16 bytes) and local `out` (`[f32; 2]`, 8 bytes) and 1 more with its counter. Those arrays live in local memory (`.local`) while the loop stays rolled",
+            ),
+        ];
+        for (described, expected) in cases {
+            assert_eq!(join_local_note(&described), expected);
+        }
     }
 }

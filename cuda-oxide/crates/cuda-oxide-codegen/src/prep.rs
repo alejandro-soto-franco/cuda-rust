@@ -218,13 +218,17 @@ pub fn prepare_mir_module(
         verify_operation(ctx, module, "module post-second-mem2reg")?;
     }
 
-    mir_transforms::unroll::unroll_annotated_loops(module, ctx, &mut analyses).map_err(
-        |error| PipelineError::Verification {
-            name: "loop-unroll".to_string(),
-            message: error.disp(ctx).to_string(),
-            operation: None,
-        },
-    )?;
+    mir_transforms::unroll::unroll_annotated_loops_naming_locals(
+        module,
+        ctx,
+        &mut analyses,
+        &describe_stack_slot,
+    )
+    .map_err(|error| PipelineError::Verification {
+        name: "loop-unroll".to_string(),
+        message: error.disp(ctx).to_string(),
+        operation: None,
+    })?;
     verify_operation(ctx, module, "module post-unroll")?;
 
     run_optional_mir_passes(
@@ -451,6 +455,23 @@ fn run_optional_mir_passes(
         module,
         &format!("module post-optional-mir-passes ({stage:?})"),
     )
+}
+
+/// Name the Rust local behind a `mir.alloca` for the loop-unroll warnings, in
+/// the spelling of the local-memory diagnostic: local `acc` (`[f32; 4]`, 16 bytes).
+/// Compiler temporaries carry no provenance and return `None`.
+fn describe_stack_slot(ctx: &Context, slot: Ptr<Operation>) -> Option<String> {
+    let provenance = llvm_export::ops::local_memory_provenance(ctx, slot)?;
+    let bytes = if provenance.size_bytes == 1 {
+        "1 byte".to_string()
+    } else {
+        format!("{} bytes", provenance.size_bytes)
+    };
+    Some(format!(
+        "local `{}` (`{}`, {bytes})",
+        provenance.binding_name.as_str(),
+        provenance.type_name.as_str()
+    ))
 }
 
 #[cfg(test)]
@@ -890,5 +911,59 @@ mod tests {
             .insert_at_back(block, &ctx);
 
         assert!(has_high_level_cute_operations(&ctx, module_operation));
+    }
+
+    #[test]
+    fn stack_slot_description_follows_the_local_memory_diagnostic_spelling() {
+        let mut ctx = Context::new();
+        dialect_mir::register(&mut ctx);
+        let i32_ty = pliron::builtin::types::IntegerType::get(
+            &ctx,
+            32,
+            pliron::builtin::types::Signedness::Signless,
+        );
+        let ptr_ty = dialect_mir::types::MirPtrType::get_generic(&mut ctx, i32_ty.into(), true);
+        let slot = |ctx: &mut Context| {
+            pliron::operation::Operation::new(
+                ctx,
+                dialect_mir::ops::MirAllocaOp::get_concrete_op_info(),
+                vec![ptr_ty.into()],
+                vec![],
+                vec![],
+                0,
+            )
+        };
+
+        let unnamed = slot(&mut ctx);
+        assert_eq!(describe_stack_slot(&ctx, unnamed), None);
+
+        let cases = [
+            (
+                "acc",
+                "[[f32; 8]; 32]",
+                1024,
+                "local `acc` (`[[f32; 8]; 32]`, 1024 bytes)",
+            ),
+            ("flag", "[u8; 1]", 1, "local `flag` (`[u8; 1]`, 1 byte)"),
+            ("empty", "[u8; 0]", 0, "local `empty` (`[u8; 0]`, 0 bytes)"),
+        ];
+        for (name, type_name, size_bytes, expected) in cases {
+            let named = slot(&mut ctx);
+            llvm_export::ops::set_local_memory_provenance(
+                &mut ctx,
+                named,
+                llvm_export::ops::LocalMemoryProvenanceAttr {
+                    local_index: 1,
+                    size_bytes,
+                    binding_name: name.into(),
+                    type_name: type_name.into(),
+                },
+            );
+            assert_eq!(
+                describe_stack_slot(&ctx, named).as_deref(),
+                Some(expected),
+                "{name}"
+            );
+        }
     }
 }
